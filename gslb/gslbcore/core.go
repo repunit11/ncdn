@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -216,6 +217,29 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// FIXME(student): Implement your own query logic
-	return []netip.Addr{c.cfg.Pops[0].Ip4}
+	var srcRegion *RegionState
+
+	// srcIPが所属するregion特定
+	for _, region := range c.regions {
+		for _, prefix := range region.info.Prefixes {
+			if ok := prefix.Contains(srcIP); ok {
+				srcRegion = region
+				break
+			}
+		}
+		if srcRegion != nil {
+			break
+		}
+	}
+
+	// fallback
+	if srcRegion == nil {
+		srcRegion = c.regions[0]
+	}
+
+	// PoPを探す
+	min := slices.Min(srcRegion.popLatency)
+	index := slices.Index(srcRegion.popLatency, min)
+
+	return []netip.Addr{c.cfg.Pops[index].Ip4}
 }
