@@ -213,6 +213,10 @@ func (c *GslbCore) PopIdFromIP(ip netip.Addr) string {
 
 func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	slog.Info("Query", slog.String("srcIP", srcIP.String()))
+	start := time.Now()
+	defer func() {
+		slog.Info("Query Done", slog.Duration("took", time.Since(start)))
+	}()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
