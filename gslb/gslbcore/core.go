@@ -1,6 +1,7 @@
 package gslbcore
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -211,7 +212,7 @@ func (c *GslbCore) PopIdFromIP(ip netip.Addr) string {
 	return "<not found>"
 }
 
-func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
+func (c *GslbCore) Query(ctx context.Context, srcIP netip.Addr) []netip.Addr {
 	slog.Info("Query", slog.String("srcIP", srcIP.String()))
 	start := time.Now()
 	defer func() {
@@ -242,8 +243,31 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	}
 
 	// PoPを探す
-	min := slices.Min(srcRegion.popLatency)
-	index := slices.Index(srcRegion.popLatency, min)
+	type candidate struct {
+		index   int
+		latency float64
+	}
 
-	return []netip.Addr{c.cfg.Pops[index].Ip4}
+	candidates := make([]candidate, 0, len(c.cfg.Pops))
+	for i, lat := range srcRegion.popLatency {
+		candidates = append(candidates, candidate{
+			index:   i,
+			latency: lat,
+		})
+	}
+
+	slices.SortFunc(candidates, func(a, b candidate) int {
+		return cmp.Compare(a.latency, b.latency)
+	})
+
+	for _, cand := range candidates {
+		_, err := c.fetchPoPStatus(ctx, c.cfg.Pops[cand.index].Ip4)
+		if err != nil {
+			slog.Error("PoP status fetch failed with error", slog.String("pop.Id", c.cfg.Pops[cand.index].Id), slog.String("error", err.Error()))
+			continue
+		}
+		return []netip.Addr{c.cfg.Pops[cand.index].Ip4}
+	}
+
+	return []netip.Addr{c.cfg.Pops[candidates[0].index].Ip4}
 }

@@ -63,7 +63,7 @@ func (c *GslbCore) spawnHTTPServer(ctx context.Context) error {
 		}
 
 		slog.Info("Query via HTTP start", slog.String("srcip", srcIP.String()))
-		results := c.Query(srcIP)
+		results := c.Query(ctx, srcIP)
 		slog.Info("Query via HTTP end")
 		alus := make([]AnnotatedLookup, len(results))
 		for i := range results {
