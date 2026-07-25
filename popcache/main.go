@@ -17,6 +17,28 @@ var originURLStr = flag.String("originURL", "http://localhost:8888", "Origin ser
 var listenAddr = flag.String("listenAddr", ":8889", "Address to listen on")
 var nodeId = flag.String("nodeId", "unknown_node", "Name of the node")
 
+type CacheHandler struct {
+	proxy http.Handler
+	cache map[string]CacheEntry
+}
+
+type CacheEntry struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+	StoredAt   time.Time
+}
+
+func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	key := r.Host + r.URL.RequestURI()
+	if val, ok := h.cache[key]; ok {
+		w.WriteHeader(val.StatusCode)
+		w.Write(val.Body)
+		return
+	}
+	h.proxy.ServeHTTP(w, r)
+}
+
 func main() {
 	flag.Parse()
 
@@ -53,14 +75,19 @@ func main() {
 		// return 204
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.Handle("/", &httputil.ReverseProxy{
-		// FIXME: actually cache stuff...
+	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetXForwarded()
 			r.Out.Header.Set("X-NCDN-PoPCache-NodeId", *nodeId)
 			r.SetURL(originURL)
 		},
-	})
+	}
+
+	cachehandler := &CacheHandler{
+		proxy,
+		map[string]CacheEntry{},
+	}
+	mux.Handle("/", cachehandler)
 
 	log.Printf("Listening on %s...", *listenAddr)
 	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
