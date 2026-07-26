@@ -1,11 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"time"
@@ -37,23 +38,27 @@ func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(val.Body)
 		return
 	}
-	rr := httptest.NewRecorder()
-	h.proxy.ServeHTTP(rr, r)
 
-	res := rr.Result()
-	body := rr.Body.Bytes()
+	h.proxy.ServeHTTP(w, r)
+}
 
-	newVal := CacheEntry{
+func (h *CacheHandler) modifier(res *http.Response) error {
+	key := res.Request.Header.Get("X-Forwarded-Host") + res.Request.URL.RequestURI()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	_ = res.Body.Close()
+
+	res.Body = io.NopCloser(bytes.NewReader(body))
+
+	h.cache[key] = CacheEntry{
 		StatusCode: res.StatusCode,
 		Header:     res.Header,
 		Body:       body,
 		StoredAt:   time.Now(),
 	}
-
-	h.cache[key] = newVal
-
-	w.WriteHeader(newVal.StatusCode)
-	w.Write(newVal.Body)
+	return nil
 }
 
 func main() {
@@ -104,6 +109,7 @@ func main() {
 		proxy,
 		map[string]CacheEntry{},
 	}
+	proxy.ModifyResponse = cachehandler.modifier
 	mux.Handle("/", cachehandler)
 
 	log.Printf("Listening on %s...", *listenAddr)
