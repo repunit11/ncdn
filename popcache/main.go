@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"time"
@@ -36,7 +37,23 @@ func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(val.Body)
 		return
 	}
-	h.proxy.ServeHTTP(w, r)
+	rr := httptest.NewRecorder()
+	h.proxy.ServeHTTP(rr, r)
+
+	res := rr.Result()
+	body := rr.Body.Bytes()
+
+	newVal := CacheEntry{
+		StatusCode: res.StatusCode,
+		Header:     res.Header,
+		Body:       body,
+		StoredAt:   time.Now(),
+	}
+
+	h.cache[key] = newVal
+
+	w.WriteHeader(newVal.StatusCode)
+	w.Write(newVal.Body)
 }
 
 func main() {
