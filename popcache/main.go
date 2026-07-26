@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/yzp0n/ncdn/httprps"
@@ -22,6 +23,7 @@ var nodeId = flag.String("nodeId", "unknown_node", "Name of the node")
 type CacheHandler struct {
 	proxy http.Handler
 	cache map[string]CacheEntry
+	mu    sync.RWMutex
 }
 
 type CacheEntry struct {
@@ -33,7 +35,10 @@ type CacheEntry struct {
 
 func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.Host + r.URL.RequestURI()
-	if val, ok := h.cache[key]; ok {
+	h.mu.RLock()
+	val, ok := h.cache[key]
+	h.mu.RUnlock()
+	if ok {
 		w.WriteHeader(val.StatusCode)
 		w.Write(val.Body)
 		return
@@ -52,6 +57,8 @@ func (h *CacheHandler) modifier(res *http.Response) error {
 
 	res.Body = io.NopCloser(bytes.NewReader(body))
 
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cache[key] = CacheEntry{
 		StatusCode: res.StatusCode,
 		Header:     res.Header,
@@ -106,8 +113,9 @@ func main() {
 	}
 
 	cachehandler := &CacheHandler{
-		proxy,
-		map[string]CacheEntry{},
+		proxy: proxy,
+		cache: map[string]CacheEntry{},
+		mu:    sync.RWMutex{},
 	}
 	proxy.ModifyResponse = cachehandler.modifier
 	mux.Handle("/", cachehandler)
