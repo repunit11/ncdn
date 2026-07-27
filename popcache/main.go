@@ -51,8 +51,11 @@ func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	val, ok := h.cache[key]
 	h.mu.RUnlock()
 	if ok {
+		for key, val := range val.Header {
+			w.Header()[key] = append([]string(nil), val...)
+		}
 		w.WriteHeader(val.StatusCode)
-		w.Write(val.Body)
+		_, _ = w.Write(val.Body)
 		return
 	}
 
@@ -76,7 +79,7 @@ func (h *CacheHandler) modifier(res *http.Response) error {
 	defer h.mu.Unlock()
 	h.cache[key] = CacheEntry{
 		StatusCode: res.StatusCode,
-		Header:     res.Header,
+		Header:     res.Header.Clone(),
 		Body:       body,
 		StoredAt:   time.Now(),
 	}
