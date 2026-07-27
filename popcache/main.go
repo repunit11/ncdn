@@ -33,7 +33,19 @@ type CacheEntry struct {
 	StoredAt   time.Time
 }
 
+func cacheableRequest(req *http.Request) bool {
+	return req.Method == http.MethodGet
+}
+
+func cacheableResponse(res *http.Response) bool {
+	return res.StatusCode == http.StatusOK
+}
+
 func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !cacheableRequest(r) {
+		h.proxy.ServeHTTP(w, r)
+		return
+	}
 	key := r.Host + r.URL.RequestURI()
 	h.mu.RLock()
 	val, ok := h.cache[key]
@@ -48,6 +60,9 @@ func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *CacheHandler) modifier(res *http.Response) error {
+	if !cacheableRequest(res.Request) || !cacheableResponse(res) {
+		return nil
+	}
 	key := res.Request.Header.Get("X-Forwarded-Host") + res.Request.URL.RequestURI()
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
