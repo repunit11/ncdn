@@ -83,7 +83,7 @@ struct {
 // DoS対策の閾値
 #define RATE_LIMIT_MAX_ENTRIES 65536
 #define RATE_LIMIT_WINDOW_NS 1000000000ULL
-#define RATE_LIMIT_SYN_MAX 100
+#define RATE_LIMIT_SYN_MAX 40
 
 struct rate_limit_state {
   struct bpf_spin_lock lock;
@@ -92,11 +92,11 @@ struct rate_limit_state {
 };
 
 struct {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, RATE_LIMIT_MAX_ENTRIES);
   __type(key, uint32_t);
   __type(value, struct rate_limit_state);
-} rate_limit_state SEC(".maps");
+} rate_limit_map SEC(".maps");
 
 #if DEBUG_LB_MAIN
 #define debugk(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)

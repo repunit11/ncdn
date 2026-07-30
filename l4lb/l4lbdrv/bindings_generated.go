@@ -12,19 +12,21 @@ import (
 // Source: ../c/lb.c
 
 const (
-	DESTINATIONS_SIZE = 255 // ../c/lb.c:66
+	DESTINATIONS_SIZE = 255 // ../c/lb.c:70
 )
 
-type StatCounters struct { // ../c/lb.c:28
-	RxPacketTotal                uint64 // ../c/lb.c:29
-	RxTotalSize                  uint64 // ../c/lb.c:30
-	TooShortPacketTotal          uint64 // ../c/lb.c:32
-	NonIpv4PacketTotal           uint64 // ../c/lb.c:33
-	IpOptionPacketTotal          uint64 // ../c/lb.c:34
-	NonSupportedProtoPacketTotal uint64 // ../c/lb.c:35
-	NoVipMatchTotal              uint64 // ../c/lb.c:36
-	FailedAdjustHeadTotal        uint64 // ../c/lb.c:37
-	FailedAdjustTailTotal        uint64 // ../c/lb.c:38
+type StatCounters struct { // ../c/lb.c:25
+	RxPacketTotal                uint64 // ../c/lb.c:26
+	RxTotalSize                  uint64 // ../c/lb.c:27
+	TooShortPacketTotal          uint64 // ../c/lb.c:29
+	NonIpv4PacketTotal           uint64 // ../c/lb.c:30
+	IpOptionPacketTotal          uint64 // ../c/lb.c:31
+	NonSupportedProtoPacketTotal uint64 // ../c/lb.c:32
+	NoVipMatchTotal              uint64 // ../c/lb.c:33
+	FailedAdjustHeadTotal        uint64 // ../c/lb.c:34
+	FailedAdjustTailTotal        uint64 // ../c/lb.c:35
+	FragmentedPacketTotal        uint64 // ../c/lb.c:37
+	RateLimitedPacketTotal       uint64 // ../c/lb.c:38
 }
 
 func StatCountersAssertLayout(s *DWARFStruct) error {
@@ -86,6 +88,16 @@ func StatCountersAssertLayout(s *DWARFStruct) error {
 	if goff != uintptr(doff) {
 		return fmt.Errorf("offset mismatch: go FailedAdjustTailTotal: %d, dwarf failed_adjust_tail_total: %d", goff, doff)
 	}
+	goff = unsafe.Offsetof(StatCounters{}.FragmentedPacketTotal)
+	doff = fs["fragmented_packet_total"].Offset
+	if goff != uintptr(doff) {
+		return fmt.Errorf("offset mismatch: go FragmentedPacketTotal: %d, dwarf fragmented_packet_total: %d", goff, doff)
+	}
+	goff = unsafe.Offsetof(StatCounters{}.RateLimitedPacketTotal)
+	doff = fs["rate_limited_packet_total"].Offset
+	if goff != uintptr(doff) {
+		return fmt.Errorf("offset mismatch: go RateLimitedPacketTotal: %d, dwarf rate_limited_packet_total: %d", goff, doff)
+	}
 
 	return nil
 }
@@ -100,6 +112,8 @@ func (c *StatCounters) Add(other *StatCounters) {
 	c.NoVipMatchTotal += other.NoVipMatchTotal
 	c.FailedAdjustHeadTotal += other.FailedAdjustHeadTotal
 	c.FailedAdjustTailTotal += other.FailedAdjustTailTotal
+	c.FragmentedPacketTotal += other.FragmentedPacketTotal
+	c.RateLimitedPacketTotal += other.RateLimitedPacketTotal
 }
 
 func (c *StatCounters) String() string {
@@ -132,6 +146,12 @@ func (c *StatCounters) String() string {
 	if c.FailedAdjustTailTotal != 0 {
 		buf.WriteString(fmt.Sprintf("FailedAdjustTailTotal=%d, ", c.FailedAdjustTailTotal))
 	}
+	if c.FragmentedPacketTotal != 0 {
+		buf.WriteString(fmt.Sprintf("FragmentedPacketTotal=%d, ", c.FragmentedPacketTotal))
+	}
+	if c.RateLimitedPacketTotal != 0 {
+		buf.WriteString(fmt.Sprintf("RateLimitedPacketTotal=%d, ", c.RateLimitedPacketTotal))
+	}
 	if strings.HasSuffix(buf.String(), ", ") {
 		buf.Truncate(buf.Len() - 2)
 	}
@@ -139,9 +159,9 @@ func (c *StatCounters) String() string {
 	return buf.String()
 }
 
-type LbConfig struct { // ../c/lb.c:49
-	VipAddress uint32 // ../c/lb.c:50
-	NumDests   uint32 // ../c/lb.c:51
+type LbConfig struct { // ../c/lb.c:51
+	VipAddress uint32 // ../c/lb.c:52
+	NumDests   uint32 // ../c/lb.c:53
 }
 
 func LbConfigAssertLayout(s *DWARFStruct) error {
