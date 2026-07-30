@@ -84,6 +84,8 @@ struct {
 #define RATE_LIMIT_MAX_ENTRIES 65536
 #define RATE_LIMIT_WINDOW_NS 1000000000ULL
 #define RATE_LIMIT_SYN_MAX 40
+#define GLOBAL_WINDOW_NS 1000000000ULL
+#define GLOBAL_SYN_MAX 10000
 
 struct rate_limit_state {
   struct bpf_spin_lock lock;
@@ -97,6 +99,19 @@ struct {
   __type(key, uint32_t);
   __type(value, struct rate_limit_state);
 } rate_limit_map SEC(".maps");
+
+struct global_rate_state {
+  struct bpf_spin_lock lock;
+  uint32_t syn_count;
+  uint64_t window_start_ns;
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, uint32_t);
+  __type(value, struct global_rate_state);
+} global_rate_map SEC(".maps");
 
 #if DEBUG_LB_MAIN
 #define debugk(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
@@ -140,6 +155,29 @@ static __always_inline int is_syn_rate_limited(uint32_t source_address) {
 
   bpf_spin_unlock(&state->lock);
 
+  return limited;
+}
+
+static __always_inline int is_global_rate_limited(void) {
+  uint32_t key = 0;
+  uint64_t now = bpf_ktime_get_ns();
+  struct global_rate_state *s = bpf_map_lookup_elem(&global_rate_map, &key);
+
+  if (!s)
+    return 1;
+  int limited = 0;
+
+  bpf_spin_lock(&s->lock);
+
+  if (now - s->window_start_ns >= GLOBAL_WINDOW_NS) {
+    s->window_start_ns = now;
+    s->syn_count = 1;
+  } else if (s->syn_count >= GLOBAL_SYN_MAX) {
+    limited = 1;
+  } else {
+    s->syn_count++;
+  }
+  bpf_spin_unlock(&s->lock);
   return limited;
 }
 
@@ -216,7 +254,7 @@ int lb_main(struct xdp_md *ctx) {
 
   // SYNパケットのレート制限を確認
   if (tcp->syn && !tcp->ack) {
-    if (is_syn_rate_limited(ip->saddr)) {
+    if (is_syn_rate_limited(ip->saddr) || is_global_rate_limited()) {
       ++c->rate_limited_packet_total;
       EXIT(XDP_DROP);
     }
