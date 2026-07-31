@@ -234,9 +234,10 @@ int lb_main(struct xdp_md *ctx) {
     ++c->no_vip_match_total;
     EXIT(XDP_PASS);
   }
+  // TCP以外の時DROP
   if (ip->protocol != IPPROTO_TCP) {
     ++c->non_supported_proto_packet_total;
-    EXIT(XDP_PASS);
+    EXIT(XDP_DROP);
   }
 
   // パケットがフラグメントされているか確認
@@ -251,6 +252,11 @@ int lb_main(struct xdp_md *ctx) {
   c->rx_total_size += data_end - data;
 
   struct tcphdr *tcp = (struct tcphdr *)(ip + 1);
+
+  // Firewall：宛先ポート:8889以外Drop
+  if (ntohs(tcp->dest) != 8889) {
+    EXIT(XDP_DROP);
+  }
 
   // SYNパケットのレート制限を確認
   if (tcp->syn && !tcp->ack) {
