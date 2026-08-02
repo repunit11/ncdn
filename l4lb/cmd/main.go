@@ -61,19 +61,26 @@ func main() {
 		slog.Error("Failed to parse dest string", slog.String("err", err.Error()))
 	}
 
-	cfg := &l4lbdrv.Config{
+	driverCfg := l4lbdrv.Config{
 		BinPath:        *lbBin,
 		XdpCapHookPath: *xdpcapHookPath,
 		InterfaceName:  *xdpif,
-		VIP:            netip.MustParseAddr(*vip),
-		Dests:          dests,
 	}
-	lb, err := l4lbdrv.New(cfg)
+
+	forwardingState := l4lbdrv.ForwardingState{
+		VIP:   netip.MustParseAddr(*vip),
+		Dests: dests,
+	}
+	lb, err := l4lbdrv.New(driverCfg)
 	if err != nil {
 		log.Panicf("Failed to create l4lb instance: %v", err)
 	}
 	slog.Info("L4LB started.")
 	defer lb.Close()
+
+	if err := lb.Apply(forwardingState); err != nil {
+		log.Panicf("Failed to apply forwarding state: %v", err)
+	}
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
