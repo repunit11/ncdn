@@ -1,7 +1,9 @@
 package control
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"time"
@@ -22,7 +24,26 @@ func New(dp DataPlane, desiredState l4lbdrv.ForwardingState) *Controller {
 	return &Controller{dp, desiredState}
 }
 
-func (c *Controller) Reconcile() error {
+func (c *Controller) Run(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	if err := c.reconcile(); err != nil {
+		slog.Error("Failed to reconcile", "err", err)
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := c.reconcile(); err != nil {
+				slog.Error("Failed to reconcile", "err", err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *Controller) reconcile() error {
 	state := c.desiredState
 	state.Dests = c.healthyDests()
 	return c.dp.Apply(state)

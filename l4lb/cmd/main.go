@@ -1,19 +1,20 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
-	"time"
 
 	"github.com/yzp0n/ncdn/l4lb/control"
+	"github.com/yzp0n/ncdn/l4lb/dataplane"
 	"github.com/yzp0n/ncdn/l4lb/l4lbdrv"
 )
 
@@ -80,30 +81,23 @@ func main() {
 	defer dp.Close()
 
 	controller := control.New(dp, forwardingState)
-	if err := controller.Reconcile(); err != nil {
-		log.Panicf("Initial reconcile failed: %v", err)
-	}
 
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
+	defer stop()
 
-	ticker := time.NewTicker(time.Second)
-	for {
-		select {
-		case <-ticker.C:
-			if err := dp.DumpCounters(); err != nil {
-				slog.Error("Failed to dump counters", slog.String("err", err.Error()))
-			}
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-			if err := controller.Reconcile(); err != nil {
-				slog.Error("Failed to reconcile", "err", err)
-			}
-			continue
+	go func() {
+		defer wg.Done()
+		dataplane.RunCounter(ctx, dp)
+	}()
+	controller.Run(ctx)
+	wg.Wait()
 
-		case <-done:
-			break
-		}
-		break
-	}
 	slog.Info("Shutting down.")
 }
