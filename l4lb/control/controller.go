@@ -19,13 +19,14 @@ type DestinationEntry struct {
 }
 
 type Controller struct {
-	dp DataPlane
+	dp           DataPlane
+	desiredState l4lbdrv.ForwardingState
 }
 
-func New(dp DataPlane) *Controller {
-	return &Controller{dp: dp}
+func New(dp DataPlane, desiredState l4lbdrv.ForwardingState) *Controller {
+	return &Controller{dp, desiredState}
 }
 
-func (c *Controller) Apply(state l4lbdrv.ForwardingState) error {
-	return c.dp.Apply(state)
+func (c *Controller) Reconcile() error {
+	return c.dp.Apply(c.desiredState)
 }

@@ -79,9 +79,9 @@ func main() {
 	slog.Info("L4LB started.")
 	defer dp.Close()
 
-	controller := control.New(dp)
-	if err := controller.Apply(forwardingState); err != nil {
-		log.Panicf("Failed to apply forwarding state: %v", err)
+	controller := control.New(dp, forwardingState)
+	if err := controller.Reconcile(); err != nil {
+		log.Panicf("Initial reconcile failed: %v", err)
 	}
 
 	done := make(chan os.Signal, 1)
@@ -93,6 +93,10 @@ func main() {
 		case <-ticker.C:
 			if err := dp.DumpCounters(); err != nil {
 				slog.Error("Failed to dump counters", slog.String("err", err.Error()))
+			}
+
+			if err := controller.Reconcile(); err != nil {
+				slog.Error("Failed to reconcile", "err", err)
 			}
 			continue
 
