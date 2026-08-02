@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yzp0n/ncdn/l4lb/control"
 	"github.com/yzp0n/ncdn/l4lb/l4lbdrv"
 )
 
@@ -71,14 +72,15 @@ func main() {
 		VIP:   netip.MustParseAddr(*vip),
 		Dests: dests,
 	}
-	lb, err := l4lbdrv.New(driverCfg)
+	dp, err := l4lbdrv.New(driverCfg)
 	if err != nil {
 		log.Panicf("Failed to create l4lb instance: %v", err)
 	}
 	slog.Info("L4LB started.")
-	defer lb.Close()
+	defer dp.Close()
 
-	if err := lb.Apply(forwardingState); err != nil {
+	controller := control.New(dp)
+	if err := controller.Apply(forwardingState); err != nil {
 		log.Panicf("Failed to apply forwarding state: %v", err)
 	}
 
@@ -89,7 +91,7 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := lb.DumpCounters(); err != nil {
+			if err := dp.DumpCounters(); err != nil {
 				slog.Error("Failed to dump counters", slog.String("err", err.Error()))
 			}
 			continue
