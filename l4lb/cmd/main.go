@@ -1,18 +1,20 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
-	"time"
 
+	"github.com/yzp0n/ncdn/l4lb/control"
+	"github.com/yzp0n/ncdn/l4lb/dataplane"
 	"github.com/yzp0n/ncdn/l4lb/l4lbdrv"
 )
 
@@ -61,36 +63,41 @@ func main() {
 		slog.Error("Failed to parse dest string", slog.String("err", err.Error()))
 	}
 
-	cfg := &l4lbdrv.Config{
+	driverCfg := l4lbdrv.Config{
 		BinPath:        *lbBin,
 		XdpCapHookPath: *xdpcapHookPath,
 		InterfaceName:  *xdpif,
-		VIP:            netip.MustParseAddr(*vip),
-		Dests:          dests,
 	}
-	lb, err := l4lbdrv.New(cfg)
+
+	forwardingState := l4lbdrv.ForwardingState{
+		VIP:   netip.MustParseAddr(*vip),
+		Dests: dests,
+	}
+	dp, err := l4lbdrv.New(driverCfg)
 	if err != nil {
 		log.Panicf("Failed to create l4lb instance: %v", err)
 	}
 	slog.Info("L4LB started.")
-	defer lb.Close()
+	defer dp.Close()
 
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
+	controller := control.New(dp, forwardingState)
 
-	ticker := time.NewTicker(time.Second)
-	for {
-		select {
-		case <-ticker.C:
-			if err := lb.DumpCounters(); err != nil {
-				slog.Error("Failed to dump counters", slog.String("err", err.Error()))
-			}
-			continue
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
+	defer stop()
 
-		case <-done:
-			break
-		}
-		break
-	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		dataplane.RunCounter(ctx, dp)
+	}()
+	controller.Run(ctx)
+	wg.Wait()
+
 	slog.Info("Shutting down.")
 }

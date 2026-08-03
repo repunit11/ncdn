@@ -40,9 +40,11 @@ func TestL4LB(t *testing.T) {
 	lbIp4 := netip.MustParseAddr("192.168.0.254")
 	lbMAC := []byte{0x00, 0x00, 0x5e, 0x00, 0x53, 0xfe}
 
-	cfg := &Config{
+	cfg := Config{
 		BinPath: "../c/lb.o",
-		VIP:     vip4,
+	}
+	forwardingState := ForwardingState{
+		VIP: vip4,
 		Dests: []DestinationEntry{
 			{
 				IPAddr:       lbIp4,
@@ -59,6 +61,10 @@ func TestL4LB(t *testing.T) {
 		t.Fatalf("Failed to create L4LB: %v", err)
 	}
 	defer lb.Close()
+	err = lb.Apply(forwardingState)
+	if err != nil {
+		t.Fatalf("Failed to apply L4LB: %v", err)
+	}
 
 	eth := &layers.Ethernet{
 		SrcMAC:       []byte{0x00, 0x00, 0x5e, 0x00, 0x53, 0xff},
