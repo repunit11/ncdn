@@ -181,6 +181,27 @@ static __always_inline int is_global_rate_limited(void) {
   return limited;
 }
 
+// ハッシュ関数
+// FNV-1aをもとにして送信元IP、宛先IP、ポート、プロトコル、backend_ipを使ってハッシュ化
+static __always_inline uint32_t mix32(uint32_t hash, uint32_t value) {
+  hash ^= value;
+  hash *= 0x01000193; // FNV-1aのprime
+  hash ^= hash >> 16;
+  return hash;
+}
+
+static __always_inline uint32_t hrw_score(const struct iphdr *ip,
+                                          const struct tcphdr *tcp,
+                                          uint32_t backend_ip) {
+  uint32_t hash = 0x811c9dc5; // FNV-1aのoffset basic
+  hash = mix32(hash, ip->saddr);
+  hash = mix32(hash, ip->daddr);
+  hash = mix32(hash, ((uint32_t)tcp->source << 16) | tcp->dest);
+  hash = mix32(hash, ip->protocol);
+  hash = mix32(hash, backend_ip);
+  return hash;
+}
+
 SEC("xdp")
 int lb_main(struct xdp_md *ctx) {
   void *data = (void *)(uint64_t)ctx->data;
@@ -266,11 +287,32 @@ int lb_main(struct xdp_md *ctx) {
     }
   }
 
-  uint32_t key = ip->saddr + tcp->source;
-  debugk("incoming packet: ip=%pI4 port=%u", &ip->saddr, ntohs(tcp->source));
+  // backendを選ぶ　ハッシュ値が最も大きいもの
+  uint32_t dest_idx = 0;
+  uint32_t best_score = 0;
+  uint8_t found = 0;
 
-  uint32_t dest_idx = (key % config->num_dests) + 1;
-  debugk("dest_idx=%d", dest_idx);
+#pragma clang loop unroll(disable)
+  for (uint32_t i = 1; i <= DESTINATIONS_SIZE; i++) {
+    if (i > config->num_dests)
+      break;
+
+    struct destination_entry *candidate =
+        bpf_map_lookup_elem(&destinations_map, &i);
+    if (!candidate)
+      continue;
+
+    uint32_t score = hrw_score(ip, tcp, candidate->ip_address);
+    if (!found || score > best_score) {
+      found = 1;
+      best_score = score;
+      dest_idx = i;
+    }
+  }
+  if (!found) {
+    EXIT(XDP_DROP);
+  }
+
   struct destination_entry *dest =
       bpf_map_lookup_elem(&destinations_map, &dest_idx);
   if (!dest) {
