@@ -88,8 +88,8 @@ func IPToUint32(ip netip.Addr) (uint32, error) {
 }
 
 func (lb *L4LB) Apply(state ForwardingState) error {
-	if len(state.Dests) < 2 {
-		return errors.New("source and at least one backend are required")
+	if len(state.Dests) < 1 {
+		return errors.New("source destination entry is required")
 	}
 	vip4, err := IPToUint32(state.VIP)
 	if err != nil {
