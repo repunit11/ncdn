@@ -19,19 +19,19 @@ type Config struct {
 	BinPath        string
 	InterfaceName  string
 	XdpCapHookPath string
+}
 
+type ForwardingState struct {
 	VIP   netip.Addr
 	Dests DestinationEntries
 }
 
 type L4LB struct {
-	cfg *Config
-
 	bindings     *Bindings
 	linkAttacher *LinkAttacher
 }
 
-func New(cfg *Config) (*L4LB, error) {
+func New(cfg Config) (*L4LB, error) {
 	if err := PrepSystemForXDP(); err != nil {
 		return nil, fmt.Errorf("Failed to prep system for XDP: %w", err)
 	}
@@ -52,7 +52,6 @@ func New(cfg *Config) (*L4LB, error) {
 	}
 
 	lb := &L4LB{
-		cfg:      cfg,
 		bindings: bindings,
 	}
 
@@ -73,9 +72,6 @@ func New(cfg *Config) (*L4LB, error) {
 		}
 		lb.linkAttacher = a
 	}
-	if err := lb.Sync(); err != nil {
-		return nil, fmt.Errorf("Initial map sync failed: %w", err)
-	}
 
 	return lb, nil
 }
@@ -91,26 +87,29 @@ func IPToUint32(ip netip.Addr) (uint32, error) {
 	return hostOrder.Uint32(ip4[:]), nil
 }
 
-func (lb *L4LB) Sync() error {
-	vip4, err := IPToUint32(lb.cfg.VIP)
+func (lb *L4LB) Apply(state ForwardingState) error {
+	if len(state.Dests) < 1 {
+		return errors.New("source destination entry is required")
+	}
+	vip4, err := IPToUint32(state.VIP)
 	if err != nil {
 		return fmt.Errorf("vip: %w", err)
 	}
 
 	err = lb.bindings.ConfigMap.Update(uint32(0), &LbConfig{
 		VipAddress: vip4,
-		NumDests:   uint32(len(lb.cfg.Dests) - 1),
+		NumDests:   uint32(len(state.Dests) - 1),
 	}, 0)
 	if err != nil {
 		return fmt.Errorf("Failed to update ConfigMap: %w", err)
 	}
 
-	keys := make([]uint32, len(lb.cfg.Dests))
+	keys := make([]uint32, len(state.Dests))
 	for i := range keys {
 		keys[i] = uint32(i)
 	}
 
-	_, err = lb.bindings.DestinationArray.BatchUpdate(keys, lb.cfg.Dests, &ebpf.BatchOptions{})
+	_, err = lb.bindings.DestinationArray.BatchUpdate(keys, state.Dests, &ebpf.BatchOptions{})
 	if err != nil {
 		return fmt.Errorf("Failed to update DestinationArray: %w", err)
 	}

@@ -17,7 +17,7 @@
 #include "xdpcap.h"
 
 // We use clang built-in memcpy, but need a function signature to provoke it.
-void* memcpy(void*, const void*, unsigned long);
+void *memcpy(void *, const void *, unsigned long);
 
 #define DEBUG_LB_MAIN 1
 
@@ -33,6 +33,9 @@ struct stat_counters { /* go:Add,String */
   uint64_t no_vip_match_total; // HELP Number of packets dropped due to their dest IP address not matching any known VIP.
   uint64_t failed_adjust_head_total; // HELP Number of xdp_adjust_head failures.
   uint64_t failed_adjust_tail_total; // HELP Number of xdp_adjust_tail failures.
+  // DoS対策の統計カウンタ
+  uint64_t fragmented_packet_total; // HELP Number of fragmented packets dropped.
+  uint64_t rate_limited_packet_total; // HELP Number of SYN packets dropped by rate
 } ALIGN8;
 // clang-format on
 
@@ -77,23 +80,137 @@ struct {
   __type(value, struct destination_entry);
 } destinations_map SEC(".maps");
 
+// DoS対策の閾値
+#define RATE_LIMIT_MAX_ENTRIES 65536
+#define RATE_LIMIT_WINDOW_NS 1000000000ULL
+#define RATE_LIMIT_SYN_MAX 40
+#define GLOBAL_WINDOW_NS 1000000000ULL
+#define GLOBAL_SYN_MAX 10000
+
+struct rate_limit_state {
+  struct bpf_spin_lock lock;
+  uint32_t syn_count;
+  uint64_t window_start_ns;
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, RATE_LIMIT_MAX_ENTRIES);
+  __type(key, uint32_t);
+  __type(value, struct rate_limit_state);
+} rate_limit_map SEC(".maps");
+
+struct global_rate_state {
+  struct bpf_spin_lock lock;
+  uint32_t syn_count;
+  uint64_t window_start_ns;
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, uint32_t);
+  __type(value, struct global_rate_state);
+} global_rate_map SEC(".maps");
+
 #if DEBUG_LB_MAIN
 #define debugk(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
 #else
-#define debugk(fmt, ...) \
-  do {                   \
+#define debugk(fmt, ...)                                                       \
+  do {                                                                         \
   } while (0)
 #endif
 
+// SYNレート制限判定関数
+static __always_inline int is_syn_rate_limited(uint32_t source_address) {
+  uint64_t now = bpf_ktime_get_ns();
+
+  struct rate_limit_state *state =
+      bpf_map_lookup_elem(&rate_limit_map, &source_address);
+
+  if (!state) {
+    struct rate_limit_state initial = {
+        .syn_count = 1,
+        .window_start_ns = now,
+    };
+
+    bpf_map_update_elem(&rate_limit_map, &source_address, &initial,
+                        BPF_NOEXIST);
+
+    return 0;
+  }
+
+  int limited = 0;
+
+  bpf_spin_lock(&state->lock);
+
+  if (now - state->window_start_ns >= RATE_LIMIT_WINDOW_NS) {
+    state->window_start_ns = now;
+    state->syn_count = 1;
+  } else if (state->syn_count >= RATE_LIMIT_SYN_MAX) {
+    limited = 1;
+  } else {
+    state->syn_count++;
+  }
+
+  bpf_spin_unlock(&state->lock);
+
+  return limited;
+}
+
+static __always_inline int is_global_rate_limited(void) {
+  uint32_t key = 0;
+  uint64_t now = bpf_ktime_get_ns();
+  struct global_rate_state *s = bpf_map_lookup_elem(&global_rate_map, &key);
+
+  if (!s)
+    return 1;
+  int limited = 0;
+
+  bpf_spin_lock(&s->lock);
+
+  if (now - s->window_start_ns >= GLOBAL_WINDOW_NS) {
+    s->window_start_ns = now;
+    s->syn_count = 1;
+  } else if (s->syn_count >= GLOBAL_SYN_MAX) {
+    limited = 1;
+  } else {
+    s->syn_count++;
+  }
+  bpf_spin_unlock(&s->lock);
+  return limited;
+}
+
+// ハッシュ関数
+// FNV-1aをもとにして送信元IP、宛先IP、ポート、プロトコル、backend_ipを使ってハッシュ化
+static __always_inline uint32_t mix32(uint32_t hash, uint32_t value) {
+  hash ^= value;
+  hash *= 0x01000193; // FNV-1aのprime
+  hash ^= hash >> 16;
+  return hash;
+}
+
+static __always_inline uint32_t hrw_score(const struct iphdr *ip,
+                                          const struct tcphdr *tcp,
+                                          uint32_t backend_ip) {
+  uint32_t hash = 0x811c9dc5; // FNV-1aのoffset basic
+  hash = mix32(hash, ip->saddr);
+  hash = mix32(hash, ip->daddr);
+  hash = mix32(hash, ((uint32_t)tcp->source << 16) | tcp->dest);
+  hash = mix32(hash, ip->protocol);
+  hash = mix32(hash, backend_ip);
+  return hash;
+}
+
 SEC("xdp")
-int lb_main(struct xdp_md* ctx) {
-  void* data = (void*)(uint64_t)ctx->data;
-  void* data_end = (void*)(uint64_t)ctx->data_end;
+int lb_main(struct xdp_md *ctx) {
+  void *data = (void *)(uint64_t)ctx->data;
+  void *data_end = (void *)(uint64_t)ctx->data_end;
 
   // Get pointer to the `stat_counters`. The stats are stored per CPU,
   // and the driver code will sum them up upon read.
   const uint32_t map_key_zero = 0;
-  struct stat_counters* c =
+  struct stat_counters *c =
       bpf_map_lookup_elem(&stat_counters_map, &map_key_zero);
   if (!c) {
     EXIT(XDP_PASS);
@@ -101,13 +218,13 @@ int lb_main(struct xdp_md* ctx) {
 
   // Get pointer to the `config`. Since the XDP prog can only access BPF maps,
   // we use an BPF map (actually a `BPF_MAP_TYPE_ARRAY`) with a single entry.
-  struct lb_config* config = bpf_map_lookup_elem(&lb_config_map, &map_key_zero);
+  struct lb_config *config = bpf_map_lookup_elem(&lb_config_map, &map_key_zero);
   if (!config) {
     EXIT(XDP_PASS);
   }
 
   // Lookup ip address and mac address to be used for the source header fields.
-  struct destination_entry* src_entry =
+  struct destination_entry *src_entry =
       bpf_map_lookup_elem(&destinations_map, &map_key_zero);
   if (!src_entry) {
     EXIT(XDP_PASS);
@@ -121,8 +238,8 @@ int lb_main(struct xdp_md* ctx) {
     EXIT(XDP_PASS);
   }
 
-  struct ethhdr* eth = data;
-  struct iphdr* ip = (struct iphdr*)(eth + 1);
+  struct ethhdr *eth = data;
+  struct iphdr *ip = (struct iphdr *)(eth + 1);
 
   // Check if the packet is IPv4, has no IP options, is destined to the VIP,
   // and is a TCP packet.
@@ -138,9 +255,16 @@ int lb_main(struct xdp_md* ctx) {
     ++c->no_vip_match_total;
     EXIT(XDP_PASS);
   }
+  // TCP以外の時DROP
   if (ip->protocol != IPPROTO_TCP) {
     ++c->non_supported_proto_packet_total;
-    EXIT(XDP_PASS);
+    EXIT(XDP_DROP);
+  }
+
+  // パケットがフラグメントされているか確認
+  if ((ntohs(ip->frag_off) & (IP_MF | IP_OFFMASK)) != 0) {
+    ++c->fragmented_packet_total;
+    EXIT(XDP_DROP);
   }
 
   // Now, we've verified that the packet is a TCP packet destined to the VIP.
@@ -148,21 +272,58 @@ int lb_main(struct xdp_md* ctx) {
   ++c->rx_packet_total;
   c->rx_total_size += data_end - data;
 
-  struct tcphdr* tcp = (struct tcphdr*)(ip + 1);
+  struct tcphdr *tcp = (struct tcphdr *)(ip + 1);
 
-  uint32_t key = ip->saddr + tcp->source;
-  debugk("incoming packet: ip=%pI4 port=%u", &ip->saddr, ntohs(tcp->source));
+  // Firewall：宛先ポート:8889以外Drop
+  if (ntohs(tcp->dest) != 8889) {
+    EXIT(XDP_DROP);
+  }
 
-  uint32_t dest_idx = (key % config->num_dests) + 1;
-  debugk("dest_idx=%d", dest_idx);
-  struct destination_entry* dest = bpf_map_lookup_elem(&destinations_map, &dest_idx);
+  // SYNパケットのレート制限を確認
+  if (tcp->syn && !tcp->ack) {
+    if (is_syn_rate_limited(ip->saddr) || is_global_rate_limited()) {
+      ++c->rate_limited_packet_total;
+      EXIT(XDP_DROP);
+    }
+  }
+
+  // backendを選ぶ　ハッシュ値が最も大きいもの
+  uint32_t dest_idx = 0;
+  uint32_t best_score = 0;
+  uint8_t found = 0;
+
+#pragma clang loop unroll(disable)
+  for (uint32_t i = 1; i <= DESTINATIONS_SIZE; i++) {
+    if (i > config->num_dests)
+      break;
+
+    struct destination_entry *candidate =
+        bpf_map_lookup_elem(&destinations_map, &i);
+    if (!candidate)
+      continue;
+
+    uint32_t score = hrw_score(ip, tcp, candidate->ip_address);
+    if (!found || score > best_score) {
+      found = 1;
+      best_score = score;
+      dest_idx = i;
+    }
+  }
+  if (!found) {
+    EXIT(XDP_DROP);
+  }
+
+  struct destination_entry *dest =
+      bpf_map_lookup_elem(&destinations_map, &dest_idx);
   if (!dest) {
     bpf_printk("ASSERTION FAILURE: no dest entry for %d", dest_idx);
     EXIT(XDP_DROP);
   }
   debugk("dest ip=%pI4", &dest->ip_address);
-  debugk("dest mac=%02x:%02x:%02x", dest->mac_address[0], dest->mac_address[1], dest->mac_address[2]);
-  debugk("         %02x:%02x:%02x", dest->mac_address[3], dest->mac_address[4], dest->mac_address[5]);
+  debugk("dest mac=%02x:%02x:%02x", dest->mac_address[0], dest->mac_address[1],
+         dest->mac_address[2]);
+  debugk("         %02x:%02x:%02x", dest->mac_address[3], dest->mac_address[4],
+         dest->mac_address[5]);
 
   // make room for the additional IP header (IPIP encapsulation)
   if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct iphdr))) {
@@ -181,17 +342,18 @@ int lb_main(struct xdp_md* ctx) {
 
   // Construct new eth header - the encap packet is from the LB to the
   // destination cache node.
-  eth = (void*)(uint64_t)ctx->data;
+  eth = (void *)(uint64_t)ctx->data;
   eth->h_proto = htons(ETH_P_IP);
 
   memcpy(eth->h_source, src_entry->mac_address, sizeof(src_entry->mac_address));
   memcpy(eth->h_dest, dest->mac_address, sizeof(dest->mac_address));
 
   // Construct the IPIP header.
-  struct iphdr* ip2 = (void*)(eth + 1);
+  struct iphdr *ip2 = (void *)(eth + 1);
 
-  ip = (void*)(ip2 + 1);
-  uint16_t iphdr_tot_len = ntohs(ip->tot_len); // FIXME - should be always fixed.
+  ip = (void *)(ip2 + 1);
+  uint16_t iphdr_tot_len =
+      ntohs(ip->tot_len); // FIXME - should be always fixed.
 
   ip2->version = 4;
   ip2->ihl = 0x5;
@@ -208,7 +370,7 @@ int lb_main(struct xdp_md* ctx) {
   // Calculate the checksum of the IPIP header.
   uint32_t sum = 0;
   for (int i = 0; i < sizeof(struct iphdr) / 2; i++) {
-    sum += ((uint16_t*)ip2)[i];
+    sum += ((uint16_t *)ip2)[i];
   }
   sum = (sum & 0xffff) + (sum >> 16);
   ip2->check = ~sum;

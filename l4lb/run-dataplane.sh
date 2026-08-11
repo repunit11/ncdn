@@ -4,11 +4,11 @@ set -e
 export MY_USER=${USER}
 export SRC_DIR=$(readlink -f $(dirname $0)/..)
 export BIN_DIR=/tmp/ncdn-bin
-mkdir -p ${BIN_DIR}
+mkdir -p ${BIN_DIR}/l4lb
 
 set -x
 (cd ${SRC_DIR}/l4lb/c && make)
-go build -o ${BIN_DIR}/l4lb ${SRC_DIR}/l4lb/cmd
+go build -o ${BIN_DIR}/l4lb/dataplane ${SRC_DIR}/l4lb/cmd/dataplane
 set +x
 
 cd ${SRC_DIR}/l4lb
@@ -26,4 +26,4 @@ done
 echo ${dests}
 
 sudo ip -n LB tunn del ipip0 || echo "no ipip0. good" # in case it exists from a `nolb.sh` run
-sudo ip netns exec LB ${BIN_DIR}/l4lb -xdpcapHookPath="" -dests="${dests}"
+sudo ip netns exec LB ${BIN_DIR}/l4lb/dataplane -xdpcapHookPath=""
