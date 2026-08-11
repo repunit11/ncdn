@@ -183,7 +183,7 @@ func (p *Gslb) A(ctx context.Context, qname, subdomain string, srcIP net.IP) ([]
 		}
 		srcIP = srcIP.Unmap()
 
-		ips := p.core.Query(srcIP)
+		ips := p.core.Query(ctx, srcIP)
 
 		for _, ip := range ips {
 			ip4 := ip.As4()

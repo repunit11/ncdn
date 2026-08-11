@@ -138,7 +138,7 @@ func TestGslbCore(t *testing.T) {
 	for _, tc := range testcases {
 		t.Run(tc.Name, func(t *testing.T) {
 			srcIP := netip.MustParseAddr(tc.SrcIPStr)
-			rs := c.Query(srcIP)
+			rs := c.Query(ctx, srcIP)
 			t.Logf("Query(%s): %v", srcIP, rs)
 		})
 	}
